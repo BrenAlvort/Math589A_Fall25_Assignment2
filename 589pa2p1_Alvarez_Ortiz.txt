@@ -1,0 +1,136 @@
+import numpy as np
+
+def paq_lu_inplace(A, tol=1e-12):
+    """
+    In-place PAQ = LU decomposition with simulated row exchanges and virtual column exchanges.
+
+    Parameters
+    ----------
+    A : ndarray, shape (m, n)
+        Input matrix that will be overwritten in-place with L (strict lower part, unit diagonal implicit)
+        and U (upper triangular part).
+    tol : float
+        Tolerance below which a pivot is treated as zero.
+
+    Returns
+    -------
+    A : ndarray
+        The same ndarray reference passed in, mutated to contain L (strict lower triangle)
+        and U (upper triangle).
+    P : ndarray of shape (m,)
+        Row permutation vector. Logical row i corresponds to physical row P[i].
+    Q : ndarray of shape (n,)
+        Column permutation vector. Logical column j corresponds to physical column Q[j].
+    pivot_count : int
+        Number of pivots found (rank estimate / number of pivot columns).
+    pivot_cols : ndarray
+        The indices (in original column numbering) of the pivot columns (length pivot_count).
+    """
+    if not isinstance(A, np.ndarray):
+        raise TypeError("A must be a NumPy ndarray")
+    m, n = A.shape
+    P = np.arange(m, dtype=int)   # simulated row ordering
+    Q = np.arange(n, dtype=int)   # virtual column ordering
+
+    min_dim = min(m, n)
+    pivot_count = 0
+
+    for k in range(min_dim):
+        # Find the largest pivot in submatrix rows k..m-1, cols k..n-1
+        best_val = 0.0
+        best_row = -1
+        best_col = -1
+        for col_log in range(k, n):
+            col_phys = Q[col_log]
+            col_segment = np.abs(A[P[k:], col_phys])
+            if col_segment.size == 0:
+                continue
+            local_max_idx = np.argmax(col_segment)
+            local_max_val = col_segment[local_max_idx]
+            if local_max_val > best_val:
+                best_val = local_max_val
+                best_col = col_log
+                best_row = k + int(local_max_idx)
+
+        # If no suitable pivot, stop
+        if best_val <= tol:
+            break
+
+        # Virtual column swap
+        if best_col != k:
+            Q[k], Q[best_col] = Q[best_col], Q[k]
+
+        # Simulated row swap
+        if best_row != k:
+            P[k], P[best_row] = P[best_row], P[k]
+
+        # Pivot element
+        piv_r = P[k]
+        piv_c = Q[k]
+        piv = A[piv_r, piv_c]
+        if abs(piv) <= tol:
+            break
+
+        # Elimination step
+        for i_log in range(k+1, m):
+            i_phys = P[i_log]
+            m_ik = A[i_phys, piv_c] / piv
+            A[i_phys, piv_c] = m_ik  # store multiplier
+            for j_log in range(k+1, n):
+                j_phys = Q[j_log]
+                A[i_phys, j_phys] -= m_ik * A[piv_r, j_phys]
+
+        pivot_count += 1
+
+    pivot_cols = Q[:pivot_count].copy()
+    return A, P, Q, pivot_count, pivot_cols
+
+
+# ================================
+# Test the PAQ = LU decomposition
+# ================================
+if __name__ == "__main__":
+    np.set_printoptions(precision=4, suppress=True)
+
+    # Example matrix (rectangular)
+    A0 = np.array([
+        [2.,  1.,  1.],
+        [4., -6.,  0.],
+        [-2., 7.,  2.],
+        [1.,  5.,  3.]
+    ], dtype=float)
+
+    # Copy to overwrite in-place
+    A = A0.copy()
+
+    # Perform decomposition
+    A_over, P, Q, r, pivcols = paq_lu_inplace(A)
+
+    print("=== PAQ = LU Decomposition ===")
+    print("Original A:\n", A0)
+    print("\nOverwritten A (contains L and U):\n", A_over)
+    print("Row permutation P:", P)
+    print("Column permutation Q:", Q)
+    print("Pivot count:", r)
+    print("Pivot columns (original indices):", pivcols)
+
+    # =============================
+    # Reconstruct and verify result
+    # =============================
+    m, n = A0.shape
+    Pmat = np.eye(m)[P, :]     # row permutation matrix
+    Qmat = np.eye(n)[:, Q]     # column permutation matrix
+
+    L = np.tril(A_over, -1) + np.eye(m, n)
+    U = np.triu(A_over)
+
+    PAQ = Pmat @ A0 @ Qmat
+    LU = L @ U
+    error = np.linalg.norm(PAQ - LU)
+
+    print("\nVerification:")
+    print("‖PAQ - LU‖_F =", error)
+    if error < 1e-10:
+        print("✅ Decomposition verified successfully.")
+    else:
+        print("❌ Decomposition error is large.")
