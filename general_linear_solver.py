@@ -1,408 +1,179 @@
 # general_linear_solver.py
+"""
+PAQ = LU (following Algorithm 4.2 partial row pivoting)
+Author: (replace with your name if desired)
+
+Exports:
+ - paq_lu_inplace(A, tol=1e-12)
+ - solve_via_paq(A, P, r, b, tol=1e-12)
+ - solve(A, b, tol=1e-12)  # autograder entry point
+
+This implementation follows Algorithm 4.2 exactly (partial pivoting by rows).
+No column permutations are performed (Q = identity).
+The matrix A is overwritten in-place with L multipliers (strict lower part)
+and U in the upper part; unit diagonal of L is implicit.
+"""
 import numpy as np
+
 
 def paq_lu_inplace(A, tol=1e-12):
     """
-    In-place PAQ = LU decomposition (rectangular A allowed).
-    Uses simulated row swaps (P) and virtual column swaps (Q).
-    The algorithm follows the structure of Algorithm 4.2 (partial pivoting),
-    extended to choose pivot columns among remaining columns and record them
-    in Q (virtual swaps). A is overwritten in-place: strict lower part = L multipliers,
-    upper part = U. Unit diagonal of L is implicit.
+    In-place LU with simulated row exchanges following Algorithm 4.2 (partial row pivoting).
+    Works for rectangular A (m x n). Does NOT perform column pivots (Q = identity).
 
     Parameters
     ----------
-    A : (m, n) numpy array (will be mutated in-place; dtype should be float)
-    tol : pivot tolerance
+    A : ndarray (m, n)
+        Matrix to factor. Will be mutated in-place (float dtype recommended).
+    tol : float
+        Pivot tolerance.
 
     Returns
     -------
-    P : list length m, simulated row ordering (logical -> original row index)
-    Q : list length n, virtual column ordering (logical -> original col index)
-    r : int, number of pivots found (rank estimate)
+    P : list of int, length m
+        Simulated row-permutation vector (logical -> original row index).
+    r : int
+        Number of pivots found (rank estimate).
+    Notes
+    -----
+    - No column permutation is used: virtual column permutation Q is identity.
+    - After the routine A contains L multipliers in strict lower triangle
+      and U in the upper triangle. Unit diagonal of L is implicit.
     """
-    if not isinstance(A, np.ndarray):
-        A = np.array(A, dtype=float)
-    else:
-        # ensure float dtype for divisions
-        if not np.issubdtype(A.dtype, np.floating):
-            A = A.astype(float, copy=False)
+    A = np.asarray(A)
+    if not np.issubdtype(A.dtype, np.floating):
+        # ensure float to allow divisions
+        A = A.astype(float, copy=False)
 
     m, n = A.shape
-    P = list(range(m))   # logical row i corresponds to original row P[i]
-    Q = list(range(n))   # logical col j corresponds to original col Q[j]
-    r = 0
+    P = list(range(m))  # simulated row ordering
+    k = 0               # current logical pivot row index
 
-    # We iterate k (logical pivot row) and j (logical pivot column). We'll keep them the same:
-    k = 0  # logical row index (0-based)
-    j = 0  # logical column index (0-based)
-    while k < m and j < n:
-        # --- Choose pivot column and pivot row in Algorithm-4.2 style ---
-        # For each candidate column col in j..n-1, find the largest |A[P[i], Q[col]]|
-        # for rows i = k..m-1. Pick the column with the largest such maximum.
-        best_col = -1
-        best_row = -1
-        best_val = 0.0
-
-        for col in range(j, n):
-            local_max = 0.0
-            local_row = -1
-            for row in range(k, m):
-                val = abs(A[P[row], Q[col]])
-                if val > local_max:
-                    local_max = val
-                    local_row = row
-            if local_max > best_val:
-                best_val = local_max
-                best_col = col
-                best_row = local_row
-
-        # If no sufficiently large pivot found, stop
-        if best_val <= tol:
-            break
-
-        # Virtual column swap: put best_col into logical position j
-        if best_col != j:
-            Q[j], Q[best_col] = Q[best_col], Q[j]
-
-        # Simulate row swap: swap P[k] and P[best_row]
-        if best_row != k:
-            P[k], P[best_row] = P[best_row], P[k]
-
-        # Pivot is at (logical row k, logical col j) -> physical (P[k], Q[j])
-        pivot = A[P[k], Q[j]]
-        if abs(pivot) <= tol:
-            # Numerical safety (shouldn't happen because best_val > tol)
-            j += 1
-            continue
-
-        # Elimination: for i = k+1 .. m-1
-        for i in range(k+1, m):
-            # multiplier m_ik = A[i,k] / A[k,k] where indices are logical -> physical via P,Q
-            a_ik = A[P[i], Q[j]]
-            if a_ik == 0.0:
-                A[P[i], Q[j]] = 0.0
-                continue
-            m_ik = a_ik / pivot
-            A[P[i], Q[j]] = m_ik  # store multiplier in strict lower triangle
-            # Update row i for logical columns col = j+1 .. n-1
-            for col in range(j+1, n):
-                A[P[i], Q[col]] -= m_ik * A[P[k], Q[col]]
-
-        # Move to next pivot position
-        r += 1
-        k += 1
-        j += 1
-
-    return P, Q, r
-
-
-def solve_via_paq(A, P, Q, r, b, tol=1e-12):
-    """
-    Solve A x = b using the in-place PAQ = LU stored in A with P, Q, and pivot count r.
-
-    Returns:
-      c : particular solution (free variables = 0), shape (n,)
-      N : nullspace mapping matrix, shape (n, n-r)
-      parameterize : function(x_free) -> x (length n)
-      pivot_cols : list of original column indices that are pivots (length r)
-      free_cols : list of original column indices that are free (length n-r)
-    """
-    A = A  # mutated in-place by paq_lu_inplace already
-    m, n = A.shape
-    b = np.asarray(b).reshape(-1)
-    if b.size != m:
-        raise ValueError("b must have length m")
-
-    # Permute b by simulated row ordering P: compute Pb (logical order)
-    Pb = np.empty(m, dtype=float)
-    for i in range(m):
-        Pb[i] = b[P[i]]
-
-    # Forward substitution Ly = Pb
-    # L has implicit ones on diagonal for first r rows, and multipliers in A[P[i], Q[j]] for j<r
-    y = np.empty(m, dtype=float)
-    for i in range(m):
-        s = Pb[i]
-        # subtract contributions from earlier rows: j = 0 .. min(i-1, r-1)
-        up_to = min(i, r)
-        for j in range(up_to):
-            s -= A[P[i], Q[j]] * y[j]
-        # diagonal of L is 1 for i < r (unit lower triangular part)
-        # For i >= r, there is no diagonal in the LU block, but the forward formula is same
-        y[i] = s
-
-    # Back substitution on U (first r logical rows/cols)
-    z = np.zeros(n, dtype=float)  # z is the variable vector in permuted (logical Q) order
-    if r > 0:
-        for i in range(r-1, -1, -1):
-            s = y[i]
-            for j in range(i+1, r):
-                s -= A[P[i], Q[j]] * z[j]
-            denom = A[P[i], Q[i]]
-            if abs(denom) <= tol:
-                raise np.linalg.LinAlgError(f"Near-zero pivot at U[{i},{i}] = {denom}")
-            z[i] = s / denom
-    # z[r:] remain zero for the particular solution (free vars set to 0)
-
-    # Build particular solution c in original column order
-    c = np.zeros(n, dtype=float)
+    # Loop over columns in the Algorithm 4.2 style
     for j in range(n):
-        c[Q[j]] = z[j]
-
-    # Build N mapping free variables (logical columns r..n-1) to full x
-    num_free = n - r
-    if num_free == 0:
-        N = np.zeros((n, 0), dtype=float)
-    else:
-        N = np.zeros((n, num_free), dtype=float)
-        # For each free logical column t (0..num_free-1) corresponding to logical col r+t:
-        for t in range(num_free):
-            # Build rhs = -U_bf[:, t] where U_bf column entries are A[P[i], Q[r+t]] for i = 0..r-1
-            rhs = np.empty(r, dtype=float)
-            for i in range(r):
-                rhs[i] = - A[P[i], Q[r + t]]
-            # Solve U_bb * zb = rhs by back-substitution
-            zb = np.empty(r, dtype=float)
-            for i in range(r-1, -1, -1):
-                s = rhs[i]
-                for j in range(i+1, r):
-                    s -= A[P[i], Q[j]] * zb[j]
-                denom = A[P[i], Q[i]]
-                if abs(denom) <= tol:
-                    raise np.linalg.LinAlgError(f"Near-zero pivot at U[{i},{i}] = {denom}")
-                zb[i] = s / denom
-            # Compose full z in logical order: first r entries = zb, entry r+t = 1, other free entries 0
-            zfull = np.zeros(n, dtype=float)
-            zfull[:r] = zb
-            zfull[r + t] = 1.0
-            # Map to original order: x[Q[j]] = zfull[j]
-            xcol = np.zeros(n, dtype=float)
-            for j in range(n):
-                xcol[Q[j]] = zfull[j]
-            N[:, t] = xcol
-
-    pivot_cols = Q[:r].copy()
-    free_cols = Q[r:].copy()
-
-    def parameterize(x_free):
-        x_free = np.asarray(x_free).reshape(-1)
-        if x_free.size != (n - r):
-            raise ValueError(f"x_free must have length {n - r}")
-        return c + N @ x_free
-
-    return c, N, parameterize, pivot_cols, free_cols
-
-
-# Quick self-test
-if __name__ == "__main__":
-    # Example: rectangular matrix
-    A0 = np.array([
-        [2., 4., 1., 0., 3.],
-        [4., 8., 2., 0., 6.],
-        [1., 0., 0., 5., 2.],
-        [0., 3., 0., 6., 1.]
-    ], dtype=float)
-
-    A = A0.copy()
-    P, Q, r = paq_lu_inplace(A, tol=1e-14)
-    print("P:", P)
-    print("Q:", Q)
-    print("r:", r)
-    print("A after PAQ=LU:\n", A)
-
-    b = np.array([1., 2., 3., 4.], dtype=float)
-    c, N, param, pivots, frees = solve_via_paq(A, P, Q, r, b)
-    print("pivots:", pivots)
-    print("free cols:", frees)
-    print("particular c:", c)
-    print("N shape:", N.shape)
-    if N.shape[1] > 0:
-        xf = np.ones(N.shape[1])
-        x = param(xf)
-    else:
-        x = c
-    print("Check Ax ~= b, residual:", np.linalg.norm(A0 @ x - b))
-    # general_linear_solver.py
-"""
-PAQ = LU factorization + solver for A x = b.
-
-Exports:
-  - paq_lu_inplace(A, tol=1e-12)
-  - solve_via_paq(A, P, Q, r, b, tol=1e-12)
-  - solve(A, b, tol=1e-12)  <- autograder expects this
-
-The wrapper solve(A,b) returns (c, N) where
-  - c is a particular solution (free variables set to zero), shape (n,)
-  - N is an (n, n-r) matrix mapping free variables to full solution:
-      x = c + N @ x_free
-"""
-import numpy as np
-
-
-def paq_lu_inplace(A, tol=1e-12):
-    """
-    In-place PAQ = LU decomposition (rectangular A allowed).
-    Simulated row swaps (P) and virtual column swaps (Q).
-    A is mutated in-place: strict lower part stores multipliers (L),
-    upper part stores U. Unit diagonal of L is implicit.
-
-    Returns:
-      P, Q, r
-      P: list length m of original row indices in logical order
-      Q: list length n of original col indices in logical order
-      r: number of pivots found (rank estimate)
-    """
-    if not isinstance(A, np.ndarray):
-        A = np.array(A, dtype=float)
-    else:
-        if not np.issubdtype(A.dtype, np.floating):
-            A = A.astype(float, copy=False)
-
-    m, n = A.shape
-    P = list(range(m))
-    Q = list(range(n))
-    r = 0
-
-    k = 0
-    j = 0
-    while k < m and j < n:
-        best_col = -1
-        best_row = -1
-        best_val = 0.0
-
-        # Choose column with largest max magnitude in rows k..m-1
-        for col in range(j, n):
-            local_max = 0.0
-            local_row = -1
-            for row in range(k, m):
-                val = abs(A[P[row], Q[col]])
-                if val > local_max:
-                    local_max = val
-                    local_row = row
-            if local_max > best_val:
-                best_val = local_max
-                best_col = col
-                best_row = local_row
-
-        if best_val <= tol:
-            # no more pivots
+        if k >= m:
             break
 
-        # Virtual column swap (Q)
-        if best_col != j:
-            Q[j], Q[best_col] = Q[best_col], Q[j]
+        # Find pivot row p among rows k..m-1 maximizing abs(A[P[row], j])
+        p = k
+        max_val = abs(A[P[k], j])
+        max_row = k
+        for row in range(k + 1, m):
+            val = abs(A[P[row], j])
+            if val > max_val:
+                max_val = val
+                max_row = row
+        p = max_row
 
-        # Simulate row swap (P)
-        if best_row != k:
-            P[k], P[best_row] = P[best_row], P[k]
-
-        pivot = A[P[k], Q[j]]
-        if abs(pivot) <= tol:
-            j += 1
+        # If pivot is (near) zero, skip this column (no pivot here)
+        if max_val <= tol:
             continue
 
-        # Eliminate below pivot and store multipliers
+        # Simulate row swap P[k] <-> P[p]
+        if p != k:
+            P[k], P[p] = P[p], P[k]
+
+        pivot = A[P[k], j]
+        # Perform elimination for rows i = k+1 .. m-1
         for i in range(k + 1, m):
-            a_ik = A[P[i], Q[j]]
+            a_ik = A[P[i], j]
             if a_ik == 0.0:
-                A[P[i], Q[j]] = 0.0
+                A[P[i], j] = 0.0
                 continue
             m_ik = a_ik / pivot
-            A[P[i], Q[j]] = m_ik
+            A[P[i], j] = m_ik  # store multiplier in L
+            # Update remaining columns j+1 .. n-1
             for col in range(j + 1, n):
-                A[P[i], Q[col]] -= m_ik * A[P[k], Q[col]]
+                A[P[i], col] -= m_ik * A[P[k], col]
 
-        r += 1
         k += 1
-        j += 1
 
-    return P, Q, r
+    r = k
+    return P, r
 
 
-def solve_via_paq(A, P, Q, r, b, tol=1e-12):
+def solve_via_paq(A, P, r, b, tol=1e-12):
     """
-    Given in-place PAQ = LU stored in A with P,Q,r, and RHS b,
-    compute the general solution x = c + N @ x_free.
+    Solve A x = b using the in-place LU stored in A and simulated row-permutation P,
+    following the decomposition produced by paq_lu_inplace (Q = identity).
 
     Returns:
-      c : (n,) particular solution (free vars = 0)
-      N : (n, n-r) matrix mapping free variables to x
+      c : particular solution (n,) with free variables set to zero
+      N : (n, n-r) nullspace mapping matrix (columns map free vars to full x)
       parameterize : callable(x_free) -> x
-      pivot_cols, free_cols : lists of original column indices
+      pivot_cols : list of pivot column indices (logical/original)
+      free_cols : list of free column indices
     """
+    A = np.asarray(A)
     m, n = A.shape
     b = np.asarray(b).reshape(-1)
     if b.size != m:
-        raise ValueError("b must have length m")
+        raise ValueError("b length must equal number of rows m")
 
     # Permute b by P (simulated row ordering): Pb[i] = b[P[i]]
     Pb = np.empty(m, dtype=float)
     for i in range(m):
         Pb[i] = b[P[i]]
 
-    # Forward substitution Ly = Pb (L has implicit unit diagonal)
+    # Forward substitution Ly = Pb
     y = np.empty(m, dtype=float)
     for i in range(m):
         s = Pb[i]
+        # L has multipliers stored in A[P[i], j] for j < r (but only columns up to n-1)
+        # subtract contributions from previous rows j = 0..min(i-1, r-1)
         up_to = min(i, r)
         for j in range(up_to):
-            s -= A[P[i], Q[j]] * y[j]
+            s -= A[P[i], j] * y[j]
         y[i] = s
 
-    # Back substitution on U (first r logical rows/cols)
-    z = np.zeros(n, dtype=float)
+    # Back substitution on U (first r logical rows and first r columns are pivots)
+    z = np.zeros(n, dtype=float)  # z is the vector of variables in column order (Q = identity)
     if r > 0:
         for i in range(r - 1, -1, -1):
             s = y[i]
             for j in range(i + 1, r):
-                s -= A[P[i], Q[j]] * z[j]
-            denom = A[P[i], Q[i]]
+                s -= A[P[i], j] * z[j]
+            denom = A[P[i], i]
             if abs(denom) <= tol:
                 raise np.linalg.LinAlgError(f"Near-zero pivot at U[{i},{i}] = {denom}")
             z[i] = s / denom
 
-    # Particular solution (free vars zero) in original column order
-    c = np.zeros(n, dtype=float)
-    for j in range(n):
-        c[Q[j]] = z[j]
+    # Particular solution: free vars (columns r..n-1) set to zero
+    c = z.copy()  # since Q is identity, mapping is direct
 
-    # Nullspace mapping N: for each free logical column t (r .. n-1), compute effect
+    # Build N mapping free variables to full x
     num_free = n - r
     if num_free == 0:
         N = np.zeros((n, 0), dtype=float)
     else:
         N = np.zeros((n, num_free), dtype=float)
         for t in range(num_free):
-            # rhs = -U_bf[:, t] where U_bf entries are A[P[i], Q[r+t]] for i=0..r-1
+            # logical free column index = r + t
+            # rhs = -U_bb^{-1} * U_bf[:,t], where U_bf entries are A[P[i], r+t] for i=0..r-1
             rhs = np.empty(r, dtype=float)
             for i in range(r):
-                rhs[i] = -A[P[i], Q[r + t]]
+                rhs[i] = -A[P[i], r + t]
             zb = np.empty(r, dtype=float)
             for i in range(r - 1, -1, -1):
                 s = rhs[i]
                 for j in range(i + 1, r):
-                    s -= A[P[i], Q[j]] * zb[j]
-                denom = A[P[i], Q[i]]
+                    s -= A[P[i], j] * zb[j]
+                denom = A[P[i], i]
                 if abs(denom) <= tol:
                     raise np.linalg.LinAlgError(f"Near-zero pivot at U[{i},{i}] = {denom}")
                 zb[i] = s / denom
-            # assemble zfull and map to original order
             zfull = np.zeros(n, dtype=float)
             zfull[:r] = zb
             zfull[r + t] = 1.0
-            xcol = np.zeros(n, dtype=float)
-            for j in range(n):
-                xcol[Q[j]] = zfull[j]
-            N[:, t] = xcol
+            N[:, t] = zfull
 
-    pivot_cols = Q[:r].copy()
-    free_cols = Q[r:].copy()
+    pivot_cols = list(range(r))
+    free_cols = list(range(r, n))
 
     def parameterize(x_free):
         x_free = np.asarray(x_free).reshape(-1)
-        if x_free.size != (n - r):
-            raise ValueError(f"x_free must have length {n - r}")
+        if x_free.size != num_free:
+            raise ValueError(f"x_free must have length {num_free}")
         return c + N @ x_free
 
     return c, N, parameterize, pivot_cols, free_cols
@@ -410,34 +181,40 @@ def solve_via_paq(A, P, Q, r, b, tol=1e-12):
 
 def solve(A, b, tol=1e-12):
     """
-    Autograder-friendly wrapper.
+    Autograder-friendly wrapper. Replaces/overwrites A internally (works on a copy).
 
-    Usage:
-      c, N = solve(A, b)
-
-    Returns:
-      c : particular solution (n,)
-      N : matrix (n, n-r) mapping free variables to solution
+    If there are no free variables (n == r) returns x (vector).
+    Otherwise returns (c, N) where c is particular solution (free vars = 0)
+    and N maps free variables to full x: x = c + N @ x_free.
     """
     A = np.asarray(A)
     b = np.asarray(b)
-
-    # Use a working copy so we don't unexpectedly mutate the caller's A
+    # Work on a copy so we don't mutate the user's A
     A_work = A.copy().astype(float, copy=True)
 
-    P, Q, r = paq_lu_inplace(A_work, tol=tol)
-    c, N, _, _, _ = solve_via_paq(A_work, P, Q, r, b, tol=tol)
-    return c, N
+    P, r = paq_lu_inplace(A_work, tol=tol)
+    c, N, _, pivots, frees = solve_via_paq(A_work, P, r, b, tol=tol)
+
+    # If no free variables, return single solution vector x
+    if N.shape[1] == 0:
+        return c  # unique solution vector
+    else:
+        return c, N
 
 
-# If run directly, small self-test
+# Quick self-test when run directly:
 if __name__ == "__main__":
-    # simple square example
+    # Square, nonsingular example
     A0 = np.array([[2.0, 1.0], [4.0, -6.0]])
     b0 = np.array([5.0, -2.0])
-    c, N = solve(A0, b0)
-    print("c:", c)
-    print("N shape:", N.shape)
-    # verify Ax ~= b for c
-    print("Residual ||A c - b||:", np.linalg.norm(A0 @ c - b0))
+    x_unique = solve(A0, b0)
+    print("unique x:", x_unique, "residual:", np.linalg.norm(A0 @ x_unique - b0))
 
+    # Underdetermined example
+    A1 = np.array([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])
+    b1 = np.array([6.0, 12.0])
+    c, N = solve(A1, b1)
+    print("particular c:", c)
+    print("N shape:", N.shape)
+    # verify Ax = b for particular solution c
+    print("residual (particular):", np.linalg.norm(A1 @ c - b1))
