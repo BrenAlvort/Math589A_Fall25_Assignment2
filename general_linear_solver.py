@@ -223,3 +223,221 @@ if __name__ == "__main__":
     else:
         x = c
     print("Check Ax ~= b, residual:", np.linalg.norm(A0 @ x - b))
+    # general_linear_solver.py
+"""
+PAQ = LU factorization + solver for A x = b.
+
+Exports:
+  - paq_lu_inplace(A, tol=1e-12)
+  - solve_via_paq(A, P, Q, r, b, tol=1e-12)
+  - solve(A, b, tol=1e-12)  <- autograder expects this
+
+The wrapper solve(A,b) returns (c, N) where
+  - c is a particular solution (free variables set to zero), shape (n,)
+  - N is an (n, n-r) matrix mapping free variables to full solution:
+      x = c + N @ x_free
+"""
+import numpy as np
+
+
+def paq_lu_inplace(A, tol=1e-12):
+    """
+    In-place PAQ = LU decomposition (rectangular A allowed).
+    Simulated row swaps (P) and virtual column swaps (Q).
+    A is mutated in-place: strict lower part stores multipliers (L),
+    upper part stores U. Unit diagonal of L is implicit.
+
+    Returns:
+      P, Q, r
+      P: list length m of original row indices in logical order
+      Q: list length n of original col indices in logical order
+      r: number of pivots found (rank estimate)
+    """
+    if not isinstance(A, np.ndarray):
+        A = np.array(A, dtype=float)
+    else:
+        if not np.issubdtype(A.dtype, np.floating):
+            A = A.astype(float, copy=False)
+
+    m, n = A.shape
+    P = list(range(m))
+    Q = list(range(n))
+    r = 0
+
+    k = 0
+    j = 0
+    while k < m and j < n:
+        best_col = -1
+        best_row = -1
+        best_val = 0.0
+
+        # Choose column with largest max magnitude in rows k..m-1
+        for col in range(j, n):
+            local_max = 0.0
+            local_row = -1
+            for row in range(k, m):
+                val = abs(A[P[row], Q[col]])
+                if val > local_max:
+                    local_max = val
+                    local_row = row
+            if local_max > best_val:
+                best_val = local_max
+                best_col = col
+                best_row = local_row
+
+        if best_val <= tol:
+            # no more pivots
+            break
+
+        # Virtual column swap (Q)
+        if best_col != j:
+            Q[j], Q[best_col] = Q[best_col], Q[j]
+
+        # Simulate row swap (P)
+        if best_row != k:
+            P[k], P[best_row] = P[best_row], P[k]
+
+        pivot = A[P[k], Q[j]]
+        if abs(pivot) <= tol:
+            j += 1
+            continue
+
+        # Eliminate below pivot and store multipliers
+        for i in range(k + 1, m):
+            a_ik = A[P[i], Q[j]]
+            if a_ik == 0.0:
+                A[P[i], Q[j]] = 0.0
+                continue
+            m_ik = a_ik / pivot
+            A[P[i], Q[j]] = m_ik
+            for col in range(j + 1, n):
+                A[P[i], Q[col]] -= m_ik * A[P[k], Q[col]]
+
+        r += 1
+        k += 1
+        j += 1
+
+    return P, Q, r
+
+
+def solve_via_paq(A, P, Q, r, b, tol=1e-12):
+    """
+    Given in-place PAQ = LU stored in A with P,Q,r, and RHS b,
+    compute the general solution x = c + N @ x_free.
+
+    Returns:
+      c : (n,) particular solution (free vars = 0)
+      N : (n, n-r) matrix mapping free variables to x
+      parameterize : callable(x_free) -> x
+      pivot_cols, free_cols : lists of original column indices
+    """
+    m, n = A.shape
+    b = np.asarray(b).reshape(-1)
+    if b.size != m:
+        raise ValueError("b must have length m")
+
+    # Permute b by P (simulated row ordering): Pb[i] = b[P[i]]
+    Pb = np.empty(m, dtype=float)
+    for i in range(m):
+        Pb[i] = b[P[i]]
+
+    # Forward substitution Ly = Pb (L has implicit unit diagonal)
+    y = np.empty(m, dtype=float)
+    for i in range(m):
+        s = Pb[i]
+        up_to = min(i, r)
+        for j in range(up_to):
+            s -= A[P[i], Q[j]] * y[j]
+        y[i] = s
+
+    # Back substitution on U (first r logical rows/cols)
+    z = np.zeros(n, dtype=float)
+    if r > 0:
+        for i in range(r - 1, -1, -1):
+            s = y[i]
+            for j in range(i + 1, r):
+                s -= A[P[i], Q[j]] * z[j]
+            denom = A[P[i], Q[i]]
+            if abs(denom) <= tol:
+                raise np.linalg.LinAlgError(f"Near-zero pivot at U[{i},{i}] = {denom}")
+            z[i] = s / denom
+
+    # Particular solution (free vars zero) in original column order
+    c = np.zeros(n, dtype=float)
+    for j in range(n):
+        c[Q[j]] = z[j]
+
+    # Nullspace mapping N: for each free logical column t (r .. n-1), compute effect
+    num_free = n - r
+    if num_free == 0:
+        N = np.zeros((n, 0), dtype=float)
+    else:
+        N = np.zeros((n, num_free), dtype=float)
+        for t in range(num_free):
+            # rhs = -U_bf[:, t] where U_bf entries are A[P[i], Q[r+t]] for i=0..r-1
+            rhs = np.empty(r, dtype=float)
+            for i in range(r):
+                rhs[i] = -A[P[i], Q[r + t]]
+            zb = np.empty(r, dtype=float)
+            for i in range(r - 1, -1, -1):
+                s = rhs[i]
+                for j in range(i + 1, r):
+                    s -= A[P[i], Q[j]] * zb[j]
+                denom = A[P[i], Q[i]]
+                if abs(denom) <= tol:
+                    raise np.linalg.LinAlgError(f"Near-zero pivot at U[{i},{i}] = {denom}")
+                zb[i] = s / denom
+            # assemble zfull and map to original order
+            zfull = np.zeros(n, dtype=float)
+            zfull[:r] = zb
+            zfull[r + t] = 1.0
+            xcol = np.zeros(n, dtype=float)
+            for j in range(n):
+                xcol[Q[j]] = zfull[j]
+            N[:, t] = xcol
+
+    pivot_cols = Q[:r].copy()
+    free_cols = Q[r:].copy()
+
+    def parameterize(x_free):
+        x_free = np.asarray(x_free).reshape(-1)
+        if x_free.size != (n - r):
+            raise ValueError(f"x_free must have length {n - r}")
+        return c + N @ x_free
+
+    return c, N, parameterize, pivot_cols, free_cols
+
+
+def solve(A, b, tol=1e-12):
+    """
+    Autograder-friendly wrapper.
+
+    Usage:
+      c, N = solve(A, b)
+
+    Returns:
+      c : particular solution (n,)
+      N : matrix (n, n-r) mapping free variables to solution
+    """
+    A = np.asarray(A)
+    b = np.asarray(b)
+
+    # Use a working copy so we don't unexpectedly mutate the caller's A
+    A_work = A.copy().astype(float, copy=True)
+
+    P, Q, r = paq_lu_inplace(A_work, tol=tol)
+    c, N, _, _, _ = solve_via_paq(A_work, P, Q, r, b, tol=tol)
+    return c, N
+
+
+# If run directly, small self-test
+if __name__ == "__main__":
+    # simple square example
+    A0 = np.array([[2.0, 1.0], [4.0, -6.0]])
+    b0 = np.array([5.0, -2.0])
+    c, N = solve(A0, b0)
+    print("c:", c)
+    print("N shape:", N.shape)
+    # verify Ax ~= b for c
+    print("Residual ||A c - b||:", np.linalg.norm(A0 @ c - b0))
+
