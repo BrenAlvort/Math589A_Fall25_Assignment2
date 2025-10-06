@@ -1,213 +1,225 @@
-def paqlu_decomposition_in_place(A):
-    """
-    Compute an in-place PAQ = LU decomposition of a rectangular matrix A with
-    row and column pivoting. This is a stub: the function body is not
-    implemented here, but the docstring fully specifies the interface,
-    conventions, and expected behavior so an implementation can be written.
+# general_linear_solver.py
+import numpy as np
 
-    Purpose and convention
-    - For a given input matrix A (m-by-n), produce integer permutation vectors
-      P (length m) and Q (length n) and overwrite A in place so that
-      if A_original denotes the input before modification, then
-          P_matrix @ A_original @ Q_matrix = L @ U,
-      where P_matrix and Q_matrix are the permutation matrices associated
-      with the vectors P and Q (see "Permutation vectors" below), L is an
-      m-by-r lower trapezoidal matrix with unit diagonal in its leading r
-      rows (where r = numerical rank), and U is an r-by-n upper trapezoidal
-      matrix. The factors L and U are stored in the single array A as
-      described in "Storage convention" below.
+def paq_lu_inplace(A, tol=1e-12):
+    """
+    In-place PAQ = LU decomposition (rectangular A allowed).
+    Uses simulated row swaps (P) and virtual column swaps (Q).
+    The algorithm follows the structure of Algorithm 4.2 (partial pivoting),
+    extended to choose pivot columns among remaining columns and record them
+    in Q (virtual swaps). A is overwritten in-place: strict lower part = L multipliers,
+    upper part = U. Unit diagonal of L is implicit.
 
     Parameters
     ----------
-    A : numpy.ndarray, shape (m, n)
-        The input matrix to be decomposed. It will be modified in place to
-        contain the L and U factors. A must be a two-dimensional contiguous
-        numeric array (float or complex). The function does not allocate a
-        separate output copy for the factorization results.
+    A : (m, n) numpy array (will be mutated in-place; dtype should be float)
+    tol : pivot tolerance
 
     Returns
     -------
-    P : numpy.ndarray, shape (m,), dtype=int
-        Row-permutation vector. The permutation vector uses zero-based
-        indexing and satisfies
-            A_original[P, :] == P_matrix @ A_original
-        where P_matrix is the corresponding m-by-m permutation matrix.
-        In words, row i of the permuted matrix is row P[i] of the original.
-
-    Q : numpy.ndarray, shape (n,), dtype=int
-        Column-permutation vector. The permutation vector uses zero-based
-        indexing and satisfies
-            A_original[:, Q] == A_original @ Q_matrix
-        where Q_matrix is the corresponding n-by-n permutation matrix.
-        In words, column j of the permuted matrix is column Q[j] of the original.
-
-    A : numpy.ndarray, shape (m, n)
-        The same array object that was passed in, modified in place so that
-        it contains the L and U factors:
-          - U is stored in the upper triangle (including the diagonal) of A
-            in the first r rows used by the elimination.
-          - The strict lower triangle of A contains the multipliers (entries
-            of L below the unit diagonal). The unit diagonal of L is implicit
-            and not stored (i.e., L[i,i] = 1 for i < r).
-        The exact layout for rectangular shapes:
-          - If m >= n (tall or square): U is n-by-n stored in rows 0..n-1,
-            L is m-by-n with unit diagonal in its first n rows.
-          - If m < n (wide): U is m-by-n stored in rows 0..m-1,
-            L is m-by-m with unit diagonal in its first m rows.
-        The numerical rank r is determined during elimination by pivot
-        thresholding (see "Rank and tolerance" below).
-
-    Notes on algorithm
-    - The decomposition is computed by Gaussian elimination with:
-        * row pivoting to avoid division by small numbers (partial pivoting),
-        * column pivoting simulated via permutation vector Q so that pivot
-          columns are moved before non-pivot columns (this is useful for
-          identifying pivot columns and free variables).
-    - Column pivoting should be implemented so that pivot columns are
-      selected with a criterion analogous to partial pivoting on rows:
-      choose a column that contains a sufficiently large pivot in the
-      current working submatrix. This places "pivot columns" before
-      "non-pivot (free) columns" in the order given by Q.
-    - The routine must not allocate full dense permutation matrices P_matrix
-      or Q_matrix; only the integer permutation vectors P and Q are returned.
-
-    Rank and tolerance
-    - The algorithm must decide when a pivot is numerically zero. An
-      appropriate default is to compare |pivot| to tol = max(m,n) * eps * max_abs,
-      where eps is machine precision and max_abs is the maximum absolute
-      value in the current working submatrix. The implementation may accept a
-      user-specified tolerance parameter; if not, it must document the
-      default used.
-    - The integer r (numerical rank) is the number of successful pivots
-      performed; after r pivots the remaining columns are considered free.
-
-    Complexity
-    - Time: O(min(m,n) * m * n) in the dense case (standard Gaussian
-      elimination complexity with pivoting).
-    - Memory: O(1) extra beyond the input A and the two permutation vectors.
-
-    Stability and usage
-    - This routine is intended for exact-solve and nullspace computations on
-      moderately sized dense matrices. For very large matrices or ill-conditioned
-      problems, use a robust SVD-based method to compute nullspaces and
-      least-squares solutions.
-    - After calling this function, use the returned P, Q, and in-place A
-      to form solutions, compute nullspace basis vectors, or to apply
-      forward/back substitution.
-
-    Exceptions
-    - The function should raise a ValueError if A is not two-dimensional.
-    - The function should raise TypeError if A's dtype is not a supported
-      numeric type.
-
-    Example (conceptual)
-    - Suppose A0 is the original m-by-n array. After calling
-          P, Q, A = paqlu_decomposition_in_place(A0)
-      the client can interpret the factorization as:
-          (permute rows by P) and (permute columns by Q) to get L and U
-      i.e. A0[P, :][:, Q] == L @ U (modulo rounding).
+    P : list length m, simulated row ordering (logical -> original row index)
+    Q : list length n, virtual column ordering (logical -> original col index)
+    r : int, number of pivots found (rank estimate)
     """
-    raise NotImplementedError("paqlu_decomposition_in_place is a stub; implement factorization here.")
+    if not isinstance(A, np.ndarray):
+        A = np.array(A, dtype=float)
+    else:
+        # ensure float dtype for divisions
+        if not np.issubdtype(A.dtype, np.floating):
+            A = A.astype(float, copy=False)
+
+    m, n = A.shape
+    P = list(range(m))   # logical row i corresponds to original row P[i]
+    Q = list(range(n))   # logical col j corresponds to original col Q[j]
+    r = 0
+
+    # We iterate k (logical pivot row) and j (logical pivot column). We'll keep them the same:
+    k = 0  # logical row index (0-based)
+    j = 0  # logical column index (0-based)
+    while k < m and j < n:
+        # --- Choose pivot column and pivot row in Algorithm-4.2 style ---
+        # For each candidate column col in j..n-1, find the largest |A[P[i], Q[col]]|
+        # for rows i = k..m-1. Pick the column with the largest such maximum.
+        best_col = -1
+        best_row = -1
+        best_val = 0.0
+
+        for col in range(j, n):
+            local_max = 0.0
+            local_row = -1
+            for row in range(k, m):
+                val = abs(A[P[row], Q[col]])
+                if val > local_max:
+                    local_max = val
+                    local_row = row
+            if local_max > best_val:
+                best_val = local_max
+                best_col = col
+                best_row = local_row
+
+        # If no sufficiently large pivot found, stop
+        if best_val <= tol:
+            break
+
+        # Virtual column swap: put best_col into logical position j
+        if best_col != j:
+            Q[j], Q[best_col] = Q[best_col], Q[j]
+
+        # Simulate row swap: swap P[k] and P[best_row]
+        if best_row != k:
+            P[k], P[best_row] = P[best_row], P[k]
+
+        # Pivot is at (logical row k, logical col j) -> physical (P[k], Q[j])
+        pivot = A[P[k], Q[j]]
+        if abs(pivot) <= tol:
+            # Numerical safety (shouldn't happen because best_val > tol)
+            j += 1
+            continue
+
+        # Elimination: for i = k+1 .. m-1
+        for i in range(k+1, m):
+            # multiplier m_ik = A[i,k] / A[k,k] where indices are logical -> physical via P,Q
+            a_ik = A[P[i], Q[j]]
+            if a_ik == 0.0:
+                A[P[i], Q[j]] = 0.0
+                continue
+            m_ik = a_ik / pivot
+            A[P[i], Q[j]] = m_ik  # store multiplier in strict lower triangle
+            # Update row i for logical columns col = j+1 .. n-1
+            for col in range(j+1, n):
+                A[P[i], Q[col]] -= m_ik * A[P[k], Q[col]]
+
+        # Move to next pivot position
+        r += 1
+        k += 1
+        j += 1
+
+    return P, Q, r
 
 
-def solve(A, b):
+def solve_via_paq(A, P, Q, r, b, tol=1e-12):
     """
-    Compute a parametric solution of the linear system A x = b in the form
-        x = N @ xfree + c,
-    where xfree is an arbitrary vector of free-variable parameters. This is
-    a stub: the function body is not implemented here, but the docstring
-    precisely specifies the inputs, outputs, conventions, and error behavior.
+    Solve A x = b using the in-place PAQ = LU stored in A with P, Q, and pivot count r.
 
-    Given
-    - A: an m-by-n matrix,
-    - b: a length-m vector (or m-by-k matrix for multiple right-hand sides),
-
-    this function returns
-    - N: an n-by(f) matrix whose columns form a basis for the nullspace of A,
-         i.e., A @ N == 0 (up to numerical tolerance). Here f = n - r is
-         the number of free variables and r is the numerical rank of A.
-    - c: a length-n vector (or n-by-k matrix matching b's second dimension)
-         that is a particular solution of A x = b, i.e., A @ c == b (within
-         tolerance), provided the system is consistent.
-
-    Parameters
-    ----------
-    A : numpy.ndarray, shape (m, n)
-        Coefficient matrix of the linear system. A may be modified in place
-        by the routine that computes an LU-like factorization; if the user
-        wishes to preserve A, they should pass a copy.
-
-    b : numpy.ndarray, shape (m,) or (m, k)
-        Right-hand side vector (or multiple right-hand sides). Entries must
-        be numeric and compatible with the dtype of A.
-
-    Returns
-    -------
-    N : numpy.ndarray, shape (n, f)
-        Basis for the nullspace (homogeneous solutions) of A. If f == 0 (full
-        column rank), N is an array with shape (n, 0). Columns of N are
-        linearly independent and span {x : A @ x == 0}.
-
-    c : numpy.ndarray, shape (n,) or (n, k)
-        A particular solution of A x = b. If multiple right-hand sides are
-        provided (b shape (m,k)), c has shape (n,k). If the system is
-        inconsistent (no solution), the function should raise a ValueError.
-
-    Algorithm outline (implementation guidance)
-    1. Compute a PAQ = LU decomposition of A using paqlu_decomposition_in_place
-       (or an equivalent routine) to identify pivot columns and the numerical
-       rank r. The function paqlu_decomposition_in_place should return the row
-       and column permutation vectors P, Q and modify A in place to store L and U.
-    2. Apply the same row permutations to b: b_permuted = b[P].
-    3. Solve L y = b_permuted by forward substitution for the first r rows.
-    4. Solve U z = y_prefix by back substitution for the pivot variables.
-       If the system is inconsistent (e.g., a zero row in U corresponds to a
-       nonzero entry in y), raise ValueError("inconsistent system").
-    5. Construct a particular solution in the permuted variable ordering:
-          x_perm = [z (pivot variables); 0 (free variables)]
-       Because column permutation Q was used, place pivot and free variables
-       into their original positions by applying the inverse permutation:
-          c = inverse_permute_columns(x_perm, Q)
-    6. Build a nullspace basis N by setting each free variable to 1 (one at a
-       time) and solving the triangular system for pivot variables (similar to
-       computing the reduced-column-echelon homogeneous solutions). Then map
-       back through inverse column permutation Q so that each basis vector is
-       expressed in the original variable ordering.
-
-    Numerical tolerances
-    - All comparisons to zero should use a tolerance based on machine
-      precision, matrix norms, and the scale of the problem (see docstring
-      of paqlu_decomposition_in_place for a recommended default).
-
-    Edge cases and exceptions
-    - If A has shape (0, n) or (m, 0) handle appropriately:
-        * m == 0: any b must be empty; then any x is a solution -> choose c = 0,
-          N = identity (n-by-n).
-        * n == 0: only possible if b == 0; otherwise inconsistent.
-    - If the system is inconsistent (no x satisfies A x = b within tolerance),
-      raise ValueError("inconsistent system: A x = b has no solution").
-    - If b has multiple right-hand sides, compute corresponding columns of c
-      and return an N that is common for all right-hand sides.
-
-    Complexity
-    - Dominated by the cost of the decomposition: O(min(m,n) * m * n) time,
-      plus O(m*n) for forward/back substitution steps.
-
-    Examples (conceptual)
-    - For a full-column-rank tall matrix (m >= n, rank = n), f = 0 and
-      N has shape (n, 0). The routine computes the unique solution c = A^{-1} b
-      via the LU factors.
-    - For an underdetermined system (n > m, rank = r < n), f = n - r > 0,
-      and the returned N provides a basis for the affine family of solutions.
-
-    Returns
-    -------
-    N, c : numpy.ndarray, numpy.ndarray
-
-    Notes
-    - This stub assumes an implementation will rely on paqlu_decomposition_in_place.
-    - The function should preserve shapes and dtypes consistently; if b is
-      real and A is real, return real N and c; if complex, return complex types.
-
+    Returns:
+      c : particular solution (free variables = 0), shape (n,)
+      N : nullspace mapping matrix, shape (n, n-r)
+      parameterize : function(x_free) -> x (length n)
+      pivot_cols : list of original column indices that are pivots (length r)
+      free_cols : list of original column indices that are free (length n-r)
     """
-    raise NotImplementedError("solve is a stub; implement parametric solver here.")
+    A = A  # mutated in-place by paq_lu_inplace already
+    m, n = A.shape
+    b = np.asarray(b).reshape(-1)
+    if b.size != m:
+        raise ValueError("b must have length m")
+
+    # Permute b by simulated row ordering P: compute Pb (logical order)
+    Pb = np.empty(m, dtype=float)
+    for i in range(m):
+        Pb[i] = b[P[i]]
+
+    # Forward substitution Ly = Pb
+    # L has implicit ones on diagonal for first r rows, and multipliers in A[P[i], Q[j]] for j<r
+    y = np.empty(m, dtype=float)
+    for i in range(m):
+        s = Pb[i]
+        # subtract contributions from earlier rows: j = 0 .. min(i-1, r-1)
+        up_to = min(i, r)
+        for j in range(up_to):
+            s -= A[P[i], Q[j]] * y[j]
+        # diagonal of L is 1 for i < r (unit lower triangular part)
+        # For i >= r, there is no diagonal in the LU block, but the forward formula is same
+        y[i] = s
+
+    # Back substitution on U (first r logical rows/cols)
+    z = np.zeros(n, dtype=float)  # z is the variable vector in permuted (logical Q) order
+    if r > 0:
+        for i in range(r-1, -1, -1):
+            s = y[i]
+            for j in range(i+1, r):
+                s -= A[P[i], Q[j]] * z[j]
+            denom = A[P[i], Q[i]]
+            if abs(denom) <= tol:
+                raise np.linalg.LinAlgError(f"Near-zero pivot at U[{i},{i}] = {denom}")
+            z[i] = s / denom
+    # z[r:] remain zero for the particular solution (free vars set to 0)
+
+    # Build particular solution c in original column order
+    c = np.zeros(n, dtype=float)
+    for j in range(n):
+        c[Q[j]] = z[j]
+
+    # Build N mapping free variables (logical columns r..n-1) to full x
+    num_free = n - r
+    if num_free == 0:
+        N = np.zeros((n, 0), dtype=float)
+    else:
+        N = np.zeros((n, num_free), dtype=float)
+        # For each free logical column t (0..num_free-1) corresponding to logical col r+t:
+        for t in range(num_free):
+            # Build rhs = -U_bf[:, t] where U_bf column entries are A[P[i], Q[r+t]] for i = 0..r-1
+            rhs = np.empty(r, dtype=float)
+            for i in range(r):
+                rhs[i] = - A[P[i], Q[r + t]]
+            # Solve U_bb * zb = rhs by back-substitution
+            zb = np.empty(r, dtype=float)
+            for i in range(r-1, -1, -1):
+                s = rhs[i]
+                for j in range(i+1, r):
+                    s -= A[P[i], Q[j]] * zb[j]
+                denom = A[P[i], Q[i]]
+                if abs(denom) <= tol:
+                    raise np.linalg.LinAlgError(f"Near-zero pivot at U[{i},{i}] = {denom}")
+                zb[i] = s / denom
+            # Compose full z in logical order: first r entries = zb, entry r+t = 1, other free entries 0
+            zfull = np.zeros(n, dtype=float)
+            zfull[:r] = zb
+            zfull[r + t] = 1.0
+            # Map to original order: x[Q[j]] = zfull[j]
+            xcol = np.zeros(n, dtype=float)
+            for j in range(n):
+                xcol[Q[j]] = zfull[j]
+            N[:, t] = xcol
+
+    pivot_cols = Q[:r].copy()
+    free_cols = Q[r:].copy()
+
+    def parameterize(x_free):
+        x_free = np.asarray(x_free).reshape(-1)
+        if x_free.size != (n - r):
+            raise ValueError(f"x_free must have length {n - r}")
+        return c + N @ x_free
+
+    return c, N, parameterize, pivot_cols, free_cols
+
+
+# Quick self-test
+if __name__ == "__main__":
+    # Example: rectangular matrix
+    A0 = np.array([
+        [2., 4., 1., 0., 3.],
+        [4., 8., 2., 0., 6.],
+        [1., 0., 0., 5., 2.],
+        [0., 3., 0., 6., 1.]
+    ], dtype=float)
+
+    A = A0.copy()
+    P, Q, r = paq_lu_inplace(A, tol=1e-14)
+    print("P:", P)
+    print("Q:", Q)
+    print("r:", r)
+    print("A after PAQ=LU:\n", A)
+
+    b = np.array([1., 2., 3., 4.], dtype=float)
+    c, N, param, pivots, frees = solve_via_paq(A, P, Q, r, b)
+    print("pivots:", pivots)
+    print("free cols:", frees)
+    print("particular c:", c)
+    print("N shape:", N.shape)
+    if N.shape[1] > 0:
+        xf = np.ones(N.shape[1])
+        x = param(xf)
+    else:
+        x = c
+    print("Check Ax ~= b, residual:", np.linalg.norm(A0 @ x - b))
